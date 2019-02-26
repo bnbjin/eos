@@ -738,6 +738,8 @@ void producer_plugin::plugin_initialize(const boost::program_options::variables_
 
 void producer_plugin::plugin_startup()
 { try {
+    
+    // 初始化日志配置
    auto& logger_map = fc::get_logger_map();
    if(logger_map.find(logger_name) != logger_map.end()) {
       _log = logger_map[logger_name];
@@ -749,36 +751,48 @@ void producer_plugin::plugin_startup()
 
    ilog("producer plugin:  plugin_startup() begin");
 
+    // 检测与校验区块链状态
    chain::controller& chain = my->chain_plug->chain();
+
+    // 当前生产者列表没有任何生产者（即给该节点分配生产者角色） 或 区块链数据库读状态是speculative
    EOS_ASSERT( my->_producers.empty() || chain.get_read_mode() == chain::db_read_mode::SPECULATIVE, plugin_config_exception,
               "node cannot have any producer-name configured because block production is impossible when read_mode is not \"speculative\"" );
 
+    // 生产者列表没有任何生产者 或 区块链校验模式是FULL（全校验，全节点）
    EOS_ASSERT( my->_producers.empty() || chain.get_validation_mode() == chain::validation_mode::FULL, plugin_config_exception,
               "node cannot have any producer-name configured because block production is not safe when validation_mode is not \"full\"" );
 
 
+    // 可以获取区块、交易数据的其他端点？
+    // 添加收到新的区块、不可逆区块数据后的回调？
    my->_accepted_block_connection.emplace(chain.accepted_block.connect( [this]( const auto& bsp ){ my->on_block( bsp ); } ));
    my->_irreversible_block_connection.emplace(chain.irreversible_block.connect( [this]( const auto& bsp ){ my->on_irreversible_block( bsp->block ); } ));
 
    const auto lib_num = chain.last_irreversible_block_num();
    const auto lib = chain.fetch_block_by_number(lib_num);
+    // 如果存在不可逆区块，则更新 当前不可逆区块时间 为 该不可逆区块的时间点
+    // 否则更新 当前不可逆区块时间 为 哨岗值
    if (lib) {
       my->on_irreversible_block(lib);
    } else {
+        // 
       my->_irreversible_block_time = fc::time_point::maximum();
    }
 
+    // 打印生产者的信息，如果有生产者的话
    if (!my->_producers.empty()) {
       ilog("Launching block production for ${n} producers at ${time}.", ("n", my->_producers.size())("time",fc::time_point::now()));
 
       if (my->_production_enabled) {
          if (chain.head_block_num() == 0) {
+            // never should go this way?
             new_chain_banner(chain);
          }
          //_production_skip_flags |= eosio::chain::skip_undo_history_check;
       }
    }
 
+    // 进入生产调度循环
    my->schedule_production_loop();
 
    ilog("producer plugin:  plugin_startup() end");
@@ -1414,15 +1428,20 @@ producer_plugin_impl::start_block_result producer_plugin_impl::start_block() {
 
 void producer_plugin_impl::schedule_production_loop() {
    chain::controller& chain = chain_plug->chain();
-   _timer.cancel();
+   _timer.cancel(); // 重置定时器
    std::weak_ptr<producer_plugin_impl> weak_this = shared_from_this();
 
+    // 生产区块？
    auto result = start_block();
 
    if (result == start_block_result::failed) {
+        // 区块生产失败
       elog("Failed to start a pending block, will try again later");
+
+        // 时间： 0.05s = 0.5s / 10
       _timer.expires_from_now( boost::posix_time::microseconds( config::block_interval_us  / 10 ));
 
+        // 设置定时器触发回调——进入调度生产循环
       // we failed to start a block, so try again later?
       _timer.async_wait([weak_this,cid=++_timer_corelation_id](const boost::system::error_code& ec) {
          auto self = weak_this.lock();
@@ -1431,7 +1450,10 @@ void producer_plugin_impl::schedule_production_loop() {
          }
       });
    } else if (result == start_block_result::waiting){
+        // 等待其他生产者产块，并未轮到当前生产者产块？
+        // 等待接收新增的区块
       if (!_producers.empty() && !production_disabled_by_policy()) {
+            // 并进入调度延时生产循环、使调度改变生效
          fc_dlog(_log, "Waiting till another block is received and scheduling Speculative/Production Change");
          schedule_delayed_production_loop(weak_this, calculate_pending_block_time());
       } else {
@@ -1440,9 +1462,12 @@ void producer_plugin_impl::schedule_production_loop() {
       }
 
    } else if (_pending_block_mode == pending_block_mode::producing) {
+        // 正在生产？
 
       // we succeeded but block may be exhausted
       static const boost::posix_time::ptime epoch(boost::gregorian::date(1970, 1, 1));
+
+        // 区块期限是在生产者的生产循环（12个区块，6s）内出块
       auto deadline = calculate_block_deadline(chain.pending_block_time());
 
       if (deadline > fc::time_point::now()) {
