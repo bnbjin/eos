@@ -1061,6 +1061,8 @@ enum class tx_category {
 
 
 producer_plugin_impl::start_block_result producer_plugin_impl::start_block() {
+    // TODO analyzation
+
    chain::controller& chain = chain_plug->chain();
 
    if( chain.get_read_mode() == chain::db_read_mode::READ_ONLY )
@@ -1472,22 +1474,32 @@ void producer_plugin_impl::schedule_production_loop() {
 
       if (deadline > fc::time_point::now()) {
          // ship this block off no later than its deadline
+            // 正常产块, 产块时间小于产块期限
+
+            // 新产的块应该会存储到pending_block_state中
          EOS_ASSERT( chain.pending_block_state(), missing_pending_block_state, "producing without pending_block_state, start_block succeeded" );
          _timer.expires_at( epoch + boost::posix_time::microseconds( deadline.time_since_epoch().count() ));
          fc_dlog(_log, "Scheduling Block Production on Normal Block #${num} for ${time}", ("num", chain.pending_block_state()->block_num)("time",deadline));
       } else {
+            // 产块时间大于等于（超出）产块期限
+
          EOS_ASSERT( chain.pending_block_state(), missing_pending_block_state, "producing without pending_block_state" );
          auto expect_time = chain.pending_block_time() - fc::microseconds(config::block_interval_us);
          // ship this block off up to 1 block time earlier or immediately
          if (fc::time_point::now() >= expect_time) {
+            // 产块预期时间 未超出 当前时刻，立即发布区块
+
             _timer.expires_from_now( boost::posix_time::microseconds( 0 ));
             fc_dlog(_log, "Scheduling Block Production on Exhausted Block #${num} immediately", ("num", chain.pending_block_state()->block_num));
          } else {
+            // 产块预期时间 超出 当前时刻，在产块预期时间再触发计时器
+
             _timer.expires_at(epoch + boost::posix_time::microseconds(expect_time.time_since_epoch().count()));
             fc_dlog(_log, "Scheduling Block Production on Exhausted Block #${num} at ${time}", ("num", chain.pending_block_state()->block_num)("time",expect_time));
          }
       }
 
+        // 定时器回调, 用于即时产块？
       _timer.async_wait([&chain,weak_this,cid=++_timer_corelation_id](const boost::system::error_code& ec) {
          auto self = weak_this.lock();
          if (self && ec != boost::asio::error::operation_aborted && cid == self->_timer_corelation_id) {
@@ -1498,11 +1510,15 @@ void producer_plugin_impl::schedule_production_loop() {
          }
       });
    } else if (_pending_block_mode == pending_block_mode::speculating && !_producers.empty() && !production_disabled_by_policy()){
+        // pending_block_mode == speculative && 生产者不为空 && 生产策略正常（未被关闭）
+
       fc_dlog(_log, "Specualtive Block Created; Scheduling Speculative/Production Change");
       EOS_ASSERT( chain.pending_block_state(), missing_pending_block_state, "speculating without pending_block_state" );
       const auto& pbs = chain.pending_block_state();
       schedule_delayed_production_loop(weak_this, pbs->header.timestamp);
    } else {
+        //
+
       fc_dlog(_log, "Speculative Block Created");
    }
 }
