@@ -1107,6 +1107,7 @@ struct controller_impl {
    {
       EOS_ASSERT( !pending, block_validate_exception, "pending block already exists" );
 
+        // 退出当前作用域时调用
       auto guard_pending = fc::make_scoped_exit([this](){
          pending.reset();
       });
@@ -1120,6 +1121,7 @@ struct controller_impl {
          pending.emplace(maybe_session());
       }
 
+        // 设置新增的区块属性
       pending->_block_status = s;
       pending->_producer_block_id = producer_block_id;
       pending->_pending_block_state = std::make_shared<block_state>( *head, when ); // promotes pending schedule (if any) to active

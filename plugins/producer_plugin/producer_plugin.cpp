@@ -1061,10 +1061,10 @@ enum class tx_category {
 
 
 producer_plugin_impl::start_block_result producer_plugin_impl::start_block() {
-    // TODO analyzation
 
    chain::controller& chain = chain_plug->chain();
 
+    // 数据库读写状态不能为 READ_ONLY，返回waiting
    if( chain.get_read_mode() == chain::db_read_mode::READ_ONLY )
       return start_block_result::waiting;
 
@@ -1075,30 +1075,33 @@ producer_plugin_impl::start_block_result producer_plugin_impl::start_block() {
    const fc::time_point now = fc::time_point::now();
    const fc::time_point block_time = calculate_pending_block_time();
 
+    // 更新pending_block_mode为producing
    _pending_block_mode = pending_block_mode::producing;
 
    // Not our turn
-   const auto& scheduled_producer = hbs->get_scheduled_producer(block_time);
-   auto currrent_watermark_itr = _producer_watermarks.find(scheduled_producer.producer_name);
-   auto signature_provider_itr = _signature_providers.find(scheduled_producer.block_signing_key);
-   auto irreversible_block_age = get_irreversible_block_age();
+   const auto& scheduled_producer = hbs->get_scheduled_producer(block_time); // 找到当前轮到的区块生产者
+   auto currrent_watermark_itr = _producer_watermarks.find(scheduled_producer.producer_name); // 轮到的生产者的watermark,是一个uint32_t的值
+   auto signature_provider_itr = _signature_providers.find(scheduled_producer.block_signing_key); // 轮到的生产者的签名
+   auto irreversible_block_age = get_irreversible_block_age(); // 当前最高区块区块时间 - 最高不可逆区块时间
 
+    // 满足以下任何一个条件 pending_block_mode = speculating
    // If the next block production opportunity is in the present or future, we're synced.
-   if( !_production_enabled ) {
+   if( !_production_enabled ) { // 不是生产节点
       _pending_block_mode = pending_block_mode::speculating;
-   } else if( _producers.find(scheduled_producer.producer_name) == _producers.end()) {
+   } else if( _producers.find(scheduled_producer.producer_name) == _producers.end()) { // 当前轮到的生产者不在生产者列表中
       _pending_block_mode = pending_block_mode::speculating;
-   } else if (signature_provider_itr == _signature_providers.end()) {
+   } else if (signature_provider_itr == _signature_providers.end()) { // 找不到轮到的生产者的签名
       elog("Not producing block because I don't have the private key for ${scheduled_key}", ("scheduled_key", scheduled_producer.block_signing_key));
       _pending_block_mode = pending_block_mode::speculating;
-   } else if ( _pause_production ) {
+   } else if ( _pause_production ) { // 暂停生产区块
       elog("Not producing block because production is explicitly paused");
       _pending_block_mode = pending_block_mode::speculating;
-   } else if ( _max_irreversible_block_age_us.count() >= 0 && irreversible_block_age >= _max_irreversible_block_age_us ) {
+   } else if ( _max_irreversible_block_age_us.count() >= 0 && irreversible_block_age >= _max_irreversible_block_age_us ) { // 不可逆区块历史时间 超出最大限制
       elog("Not producing block because the irreversible block is too old [age:${age}s, max:${max}s]", ("age", irreversible_block_age.count() / 1'000'000)( "max", _max_irreversible_block_age_us.count() / 1'000'000 ));
       _pending_block_mode = pending_block_mode::speculating;
    }
 
+    // 如果当前生产者的watermark 超过 当前最高区块高度，pending_block_mode = speculating
    if (_pending_block_mode == pending_block_mode::producing) {
       // determine if our watermark excludes us from producing at this point
       if (currrent_watermark_itr != _producer_watermarks.end()) {
@@ -1112,12 +1115,14 @@ producer_plugin_impl::start_block_result producer_plugin_impl::start_block() {
       }
    }
 
+    // 如果 满足任意前面的异常情况 且 当前时间 比 最高区块时间 还要多出5秒钟，则返回 waiting
    if (_pending_block_mode == pending_block_mode::speculating) {
       auto head_block_age = now - chain.head_block_time();
       if (head_block_age > fc::seconds(5))
          return start_block_result::waiting;
    }
 
+    // 核心产块与区块确认过程
    try {
       uint16_t blocks_to_confirm = 0;
 
@@ -1131,6 +1136,7 @@ producer_plugin_impl::start_block_result producer_plugin_impl::start_block() {
          if (currrent_watermark_itr != _producer_watermarks.end()) {
             auto watermark = currrent_watermark_itr->second;
             if (watermark < hbs->block_num) {
+                // 轮到的生产者需要确认的区块数 = 最高区块高度 - 自身的watermark
                blocks_to_confirm = std::min<uint16_t>(std::numeric_limits<uint16_t>::max(), (uint16_t)(hbs->block_num - watermark));
             }
          }

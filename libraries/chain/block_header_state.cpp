@@ -183,6 +183,7 @@ namespace eosio { namespace chain {
     return result;
   } /// next
 
+    // TODO
   void block_header_state::set_confirmed( uint16_t num_prev_blocks ) {
      /*
      idump((num_prev_blocks)(confirm_count.size()));
